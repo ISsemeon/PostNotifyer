@@ -1,0 +1,21 @@
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+venv/
+.env
+
+posts/
+
+.idea/
+.vscode/
+*.swp
+
+*.log
+*.sqlite3
+
+pip-wheel-metadata/
