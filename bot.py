@@ -3,8 +3,16 @@ from datetime import datetime
 from telegram.ext import Updater, MessageHandler, Filters
 import logging
 
-# Укажите свой токен бота здесь
-TOKEN = '7358909191:AAH2QwK0QuZBErW470xAL65rdVxQlG5l0ls'
+# Загружаем переменные окружения из файла .env, если он есть
+from dotenv import load_dotenv
+load_dotenv()
+
+# Получаем токен бота из переменной окружения
+TOKEN = os.getenv('BOT_TOKEN')
+
+# Проверяем, что токен был установлен
+if TOKEN is None:
+    raise ValueError('Не удалось найти токен бота в переменных окружения.')
 
 # Укажите имя вашего канала без символа @
 CHANNEL_USERNAME = 'botTesterss'
@@ -19,13 +27,44 @@ os.makedirs(POSTS_FOLDER, exist_ok=True)
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Функция для определения фотографий с наибольшим разрешением
+# Функция для определения фотографии с наибольшим разрешением
 def get_largest_photo(photos):
     if not photos:
         return None
     
     largest_photo = max(photos, key=lambda photo: photo.width * photo.height)
     return largest_photo
+
+# Функция для сохранения текста поста
+def save_post_text(caption, post_folder):
+    try:
+        if caption:
+            text_file_path = os.path.join(post_folder, 'caption.txt')
+            with open(text_file_path, 'w', encoding='utf-8') as text_file:
+                text_file.write(caption)
+            logging.info(f'Сохранен caption поста в файл: {text_file_path}')
+        else:
+            logging.info('В посте отсутствует caption')
+    except Exception as e:
+        logging.error(f'Ошибка при сохранении caption поста: {e}')
+
+
+# Функция для сохранения фотографии
+def save_photo(photo, post_folder, context):
+    try:
+        # Получаем информацию о файле фотографии
+        file_id = photo.file_id
+        file = context.bot.get_file(file_id)
+
+        # Получаем оригинальное имя файла
+        file_name = file.file_path.split('/')[-1]
+
+        # Скачиваем фотографию в папку текущего поста с оригинальным именем
+        photo_file_path = os.path.join(post_folder, file_name)
+        file.download(photo_file_path)
+        logging.info(f'Сохранена фотография: {photo_file_path}')
+    except Exception as e:
+        logging.error(f'Ошибка при сохранении фотографии: {e}')
 
 # Функция для обработки новых постов
 def new_posts(update, context):
@@ -45,35 +84,15 @@ def new_posts(update, context):
             post_folder = os.path.join(POSTS_FOLDER, f'post_{post_date}')
             os.makedirs(post_folder, exist_ok=True)
 
-            # Сохраняем текст поста в текстовый файл, если он есть
-            if update.channel_post.text:
-                text_file_path = os.path.join(post_folder, 'text.txt')
-                with open(text_file_path, 'w', encoding='utf-8') as text_file:
-                    text_file.write(update.channel_post.text)
-                logging.info(f'Сохранен текст поста в файл: {text_file_path}')
-            else:
-                logging.info('В посте отсутствует текст')
+            caption = update.channel_post.caption
+            save_post_text(caption, post_folder)
 
-            # Получаем список фотографий в посте
-            photos = update.channel_post.photo
-
-            if photos:
-                # Получаем фотографию с наибольшим разрешением
-                largest_photo = get_largest_photo(photos)
-                
-                # Получаем информацию о файле фотографии
-                file_id = largest_photo.file_id
-                file = context.bot.get_file(file_id)
-
-                # Получаем оригинальное имя файла
-                file_name = file.file_path.split('/')[-1]
-
-                # Скачиваем фотографию в папку текущего поста с оригинальным именем
-                photo_file_path = os.path.join(post_folder, file_name)
-                file.download(photo_file_path)
-                logging.info(f'Сохранена фотография: {photo_file_path}')
-            else:
-                logging.info('В посте отсутствуют фотографии')
+            # Получаем фотографию с наибольшим разрешением
+            largest_photo = get_largest_photo(update.channel_post.photo)
+            
+            # Сохраняем фотографию
+            if largest_photo:
+                save_photo(largest_photo, post_folder, context)
         else:
             logging.info('Обновление не связано с вашим каналом или отсутствует необходимая информация')
     except Exception as e:
@@ -91,6 +110,7 @@ def main():
 
     # Запускаем бота и начинаем проверку обновлений
     updater.start_polling()
+    logging.info('Бот запущен. Ожидание новых постов...')
     updater.idle()
 
 if __name__ == '__main__':
