@@ -3,29 +3,87 @@ from datetime import datetime
 from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
 import logging
 from dotenv import load_dotenv
-from telegram import ReplyKeyboardMarkup, KeyboardButton
-from content_handler import save_post_text, save_photo, POSTS_FOLDER  # Импортируем функции и переменную из content_handler
-from menu import start, help  # Импортируем функции из menu.py
+import sqlite3
+from threading import Lock
+import json
 
-# Загружаем переменные окружения из файла .env, если он есть
+from content_handler import *
+from menu import *
+
+# Load environment variables
 load_dotenv()
 
-# Получаем токен бота из переменной окружения
+# Telegram Bot token from environment variable
 TOKEN = os.getenv('BOT_TOKEN')
 
-# Проверяем, что токен был установлен
+# Check if bot token is set
 if TOKEN is None:
-    raise ValueError('Не удалось найти токен бота в переменных окружения.')
+    raise ValueError('Telegram Bot token not found in environment variables.')
 
-# Настройка логгирования
+# Logging configuration
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Список каналов для отслеживания
-CHANNEL_USERNAMES = ['botTesterss']
+# Initialize SQLite connection and cursor in a thread-safe manner
+def get_sqlite_connection():
+    conn = sqlite3.connect('channels_auth.db', check_same_thread=False)
+    cursor = conn.cursor()
+    return conn, cursor
 
-# Глобальная переменная для диспетчера
-dp = None
+# Function to create channels_auth_info table if it does not exist
+def create_table():
+    conn, cursor = get_sqlite_connection()
+    with conn:
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS channels_auth_info (
+                user_id INTEGER,
+                channel TEXT,
+                auth_info TEXT,
+                PRIMARY KEY (user_id, channel),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+        ''')
+
+# Call function to create table if it does not exist
+create_table()
+
+# Global lock for SQLite operations
+sqlite_lock = Lock()
+
+# Function to get authentication info for a channel
+def get_channel_auth_info(user_id, channel):
+    conn, cursor = get_sqlite_connection()
+    with conn:
+        cursor.execute('SELECT auth_info FROM channels_auth_info WHERE user_id = ? AND channel = ?', (user_id, channel))
+        result = cursor.fetchone()
+        auth_info = json.loads(result[0]) if result and result[0] else {}
+    conn.close()
+    return auth_info
+
+# Function to save authentication info for a channel
+def save_channel_auth_info(user_id, channel, auth_info):
+    conn, cursor = get_sqlite_connection()
+    with sqlite_lock:
+        with conn:
+            auth_info_json = json.dumps(auth_info)
+            cursor.execute('REPLACE INTO channels_auth_info (user_id, channel, auth_info) VALUES (?, ?, ?)', (user_id, channel, auth_info_json))
+    conn.close()
+
+# Function to delete authentication info for a channel
+def delete_channel_auth_info(user_id, channel):
+    conn, cursor = get_sqlite_connection()
+    with sqlite_lock:
+        with conn:
+            cursor.execute('DELETE FROM channels_auth_info WHERE user_id = ? AND channel = ?', (user_id, channel))
+    conn.close()
+
+# Function to check if a channel is being tracked by a user
+def is_channel_tracked(user_id, channel):
+    conn, cursor = get_sqlite_connection()
+    with conn:
+        cursor.execute('SELECT 1 FROM channels_auth_info WHERE user_id = ? AND channel = ?', (user_id, channel))
+        result = cursor.fetchone()
+        return result is not None
 
 # Функция для определения фотографии с наибольшим разрешением
 def get_largest_photo(photos):
@@ -35,77 +93,123 @@ def get_largest_photo(photos):
     largest_photo = max(photos, key=lambda photo: photo.width * photo.height)
     return largest_photo
 
-# Функция для обработки новых постов
 def new_posts(update, context):
     try:
-        # Проверяем, что обновление связано с вашими каналами и что есть channel_post
-        if update.channel_post and hasattr(update.channel_post, 'chat') and hasattr(update.channel_post, 'date'):
+        if update.channel_post and update.channel_post.chat and update.channel_post.date:
             channel_username = update.channel_post.chat.username
-            if channel_username in CHANNEL_USERNAMES:
-                # Получаем дату и время поста в виде временной метки (timestamp)
-                post_timestamp = update.channel_post.date.timestamp()
+            user_id = update.effective_user.id
 
-                # Преобразуем временную метку в объект datetime для форматирования
-                post_datetime = datetime.utcfromtimestamp(post_timestamp)
+            if user_id is None or channel_username is None:
+                logging.warning('Skipping processing due to missing user ID or channel username.')
+                return
 
-                # Форматируем дату и время поста
-                post_date = post_datetime.strftime('%Y-%m-%d_%H-%M-%S')
+            if not is_channel_tracked(user_id, channel_username):
+                logging.info(f'Update not related to tracked channels for user: {channel_username}')
+                return
 
-                # Создаем отдельную папку для текущего поста с датой и временем
-                post_folder = os.path.join(POSTS_FOLDER, f'post_{post_date}')
-                os.makedirs(post_folder, exist_ok=True)
+            auth_info = get_channel_auth_info(user_id, channel_username)
 
-                caption = update.channel_post.caption
-                save_post_text(caption, post_folder)
+            # Continue with processing as before
+            post_timestamp = update.channel_post.date.timestamp()
+            post_datetime = datetime.utcfromtimestamp(post_timestamp)
+            post_date = post_datetime.strftime('%Y-%m-%d_%H-%M-%S')
+            post_folder = os.path.join('./posts', f'post_{post_date}')
+            os.makedirs(post_folder, exist_ok=True)
 
-                # Получаем фотографию с наибольшим разрешением
-                largest_photo = get_largest_photo(update.channel_post.photo)
-                
-                # Сохраняем фотографию
-                if largest_photo:
-                    save_photo(largest_photo, post_folder, context)
-            else:
-                logging.info(f'Обновление не связано с вашими каналами или отсутствует необходимая информация: {channel_username}')
+            caption = update.channel_post.caption
+            save_post_text(caption, post_folder)
+
+            largest_photo = get_largest_photo(update.channel_post.photo)
+            if largest_photo:
+                save_photo(largest_photo, post_folder, context)
+
+            if update.channel_post.video:
+                save_video(update.channel_post.video, post_folder, context)
+
+            if update.channel_post.document:
+                save_document(update.channel_post.document, post_folder, context)
+
+            if update.channel_post.audio:
+                save_audio(update.channel_post.audio, post_folder, context)
+
+        else:
+            logging.warning('Update does not contain required attributes (channel_post, chat, date).')
+
     except Exception as e:
-        logging.error(f'Ошибка при обработке поста: {e}')
+        logging.error(f'Error processing post: {e}')
 
+# Function to add a new channel for tracking
 def add_channel(update, context):
-    # Создаем список кнопок для добавления канала
-    keyboard = [
-        [KeyboardButton('/start')],
-        [KeyboardButton('/help')],
-    ]
+    try:
+        user_id = update.effective_user.id
+        new_channel = context.args[0]
+        auth_info = context.args[1] if len(context.args) > 1 else {}
 
-    # Создаем клавиатуру из списка кнопок
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        if not is_channel_tracked(user_id, new_channel):
+            save_channel_auth_info(user_id, new_channel, auth_info)
+            logging.info(f'Added new channel for tracking: {new_channel} (user: {user_id})')
+            update.message.reply_text(f'Channel {new_channel} added for tracking.')
+        else:
+            update.message.reply_text(f'Channel {new_channel} is already being tracked.')
 
-    new_channel = context.args[0]
-    if new_channel not in CHANNEL_USERNAMES:
-        CHANNEL_USERNAMES.append(new_channel)
-        logging.info(f'Добавлен новый канал для отслеживания: {new_channel}')
-        update.message.reply_text(f'Канал {new_channel} добавлен для отслеживания.', reply_markup=reply_markup)
-        dp.add_handler(MessageHandler(Filters.update.channel_posts, new_posts))
-    else:
-        update.message.reply_text(f'Канал {new_channel} уже отслеживается.', reply_markup=reply_markup)
+    except IndexError:
+        update.message.reply_text('Please provide channel name and auth_info.')
 
-# Настройка и запуск бота
+    except Exception as e:
+        logging.error(f'Error adding channel: {e}')
+        update.message.reply_text('Failed to add channel. Please try again later.')
+
+# Function to list user's tracked channels
+def my_channels(update, context):
+    try:
+        user_id = update.effective_user.id
+        channels = []
+
+        conn, cursor = get_sqlite_connection()
+        with conn:
+            cursor.execute('SELECT channel FROM channels_auth_info WHERE user_id = ?', (user_id,))
+            result = cursor.fetchall()
+            channels = [row[0] for row in result]
+        conn.close()
+
+        if channels:
+            update.message.reply_text(f'You are tracking the following channels: {", ".join(channels)}')
+        else:
+            update.message.reply_text('You are not tracking any channels yet.')
+
+    except Exception as e:
+        logging.error(f'Error listing channels: {e}')
+        update.message.reply_text('Failed to list channels. Please try again later.')
+
+# Start command handler
+def start(update, context):
+    reply_markup = get_start_menu()
+    update.message.reply_text('Hello! I am a bot to track and save posts from Telegram channels.', reply_markup=reply_markup)
+
+# Error handler
+def error(update, context):
+    logging.warning(f'Update {update} caused error {context.error}')
+
+# Main function to start the bot
 def main():
-    global dp  # Объявляем dp как глобальную переменную
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
+    try:
+        updater = Updater(TOKEN, use_context=True)
+        dp = updater.dispatcher
 
-    # Обрабатываем только новые посты из указанных каналов
-    dp.add_handler(MessageHandler(Filters.update.channel_posts, new_posts))
-    dp.add_handler(CommandHandler('start', start))
-    dp.add_handler(CommandHandler('help', help))
+        # Add handlers for different commands and message types
+        dp.add_handler(CommandHandler("start", start))
+        dp.add_handler(CommandHandler("add_channel", add_channel, pass_args=True))
+        dp.add_handler(CommandHandler("my_channels", my_channels))
+        dp.add_handler(MessageHandler(Filters.update.channel_posts, new_posts))
+        dp.add_error_handler(error)
 
-    # Команда для добавления нового канала для отслеживания
-    dp.add_handler(CommandHandler('add_channel', add_channel, pass_args=True))
+        # Start the bot
+        updater.start_polling()
+        logging.info('Bot started. Listening for new posts...')
+        updater.idle()
 
-    # Запускаем бота и начинаем проверку обновлений
-    updater.start_polling()
-    logging.info('Бот запущен. Ожидание новых постов...')
-    updater.idle()
+    except Exception as e:
+        logging.error(f'Error in main function: {e}')
 
 if __name__ == '__main__':
     main()
