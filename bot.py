@@ -4,6 +4,8 @@ from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
 import logging
 from dotenv import load_dotenv
 from telegram import ReplyKeyboardMarkup, KeyboardButton
+from content_handler import save_post_text, save_photo, POSTS_FOLDER  # Импортируем функции и переменную из content_handler
+from menu import start, help  # Импортируем функции из menu.py
 
 # Загружаем переменные окружения из файла .env, если он есть
 load_dotenv()
@@ -14,12 +16,6 @@ TOKEN = os.getenv('BOT_TOKEN')
 # Проверяем, что токен был установлен
 if TOKEN is None:
     raise ValueError('Не удалось найти токен бота в переменных окружения.')
-
-# Папка для сохранения постов
-POSTS_FOLDER = './posts'
-
-# Создаем папку для постов, если её еще нет
-os.makedirs(POSTS_FOLDER, exist_ok=True)
 
 # Настройка логгирования
 logging.basicConfig(level=logging.INFO,
@@ -38,36 +34,6 @@ def get_largest_photo(photos):
     
     largest_photo = max(photos, key=lambda photo: photo.width * photo.height)
     return largest_photo
-
-# Функция для сохранения текста поста
-def save_post_text(caption, post_folder):
-    try:
-        if caption:
-            text_file_path = os.path.join(post_folder, 'caption.txt')
-            with open(text_file_path, 'w', encoding='utf-8') as text_file:
-                text_file.write(caption)
-            logging.info(f'Сохранен caption поста в файл: {text_file_path}')
-        else:
-            logging.info('В посте отсутствует caption')
-    except Exception as e:
-        logging.error(f'Ошибка при сохранении caption поста: {e}')
-
-# Функция для сохранения фотографии
-def save_photo(photo, post_folder, context):
-    try:
-        # Получаем информацию о файле фотографии
-        file_id = photo.file_id
-        file = context.bot.get_file(file_id)
-
-        # Получаем оригинальное имя файла
-        file_name = file.file_path.split('/')[-1]
-
-        # Скачиваем фотографию в папку текущего поста с оригинальным именем
-        photo_file_path = os.path.join(post_folder, file_name)
-        file.download(photo_file_path)
-        logging.info(f'Сохранена фотография: {photo_file_path}')
-    except Exception as e:
-        logging.error(f'Ошибка при сохранении фотографии: {e}')
 
 # Функция для обработки новых постов
 def new_posts(update, context):
@@ -103,33 +69,6 @@ def new_posts(update, context):
     except Exception as e:
         logging.error(f'Ошибка при обработке поста: {e}')
 
-def start(update, context):
-    # Создаем список кнопок для старта
-    keyboard = [
-        [KeyboardButton('/add_channel')],
-        [KeyboardButton('/help')],
-    ]
-
-    # Создаем клавиатуру из списка кнопок
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-    # Отправляем сообщение с клавиатурой кнопок
-    update.message.reply_text('Привет! Я бот для отслеживания и сохранения постов из указанных каналов Telegram.', reply_markup=reply_markup)
-
-def help(update, context):
-    # Создаем список кнопок для справки
-    keyboard = [
-        [KeyboardButton('/add_channel')],
-    ]
-
-    # Создаем клавиатуру из списка кнопок
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-    # Отправляем сообщение с клавиатурой кнопок
-    update.message.reply_text('Доступные команды:\n'
-                              '/add_channel <имя_канала> - добавить новый канал для отслеживания\n'
-                              '/help - получить справку по командам бота', reply_markup=reply_markup)
-
 def add_channel(update, context):
     # Создаем список кнопок для добавления канала
     keyboard = [
@@ -148,9 +87,6 @@ def add_channel(update, context):
         dp.add_handler(MessageHandler(Filters.update.channel_posts, new_posts))
     else:
         update.message.reply_text(f'Канал {new_channel} уже отслеживается.', reply_markup=reply_markup)
-
-
-
 
 # Настройка и запуск бота
 def main():
